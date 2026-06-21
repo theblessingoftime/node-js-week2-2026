@@ -28,6 +28,10 @@ const { formidable } = require('formidable');  // formidable v3 用 named import
 function getUploadConfig() {
   // TODO: 實作此函式
   // 提示：用 || 給預設值；MAX_FILE_SIZE_MB 是字串，記得先 Number() 轉型再換算 bytes
+  const uploadDir = process.env.UPLOAD_DIR || '/tmp';
+  const maxFileSize = Number(process.env.MAX_FILE_SIZE_MB) * 1024 * 1024 || 5 * 1024 * 1024;
+  const gymName = process.env.GYM_NAME || '未命名健身房';
+  return { uploadDir, maxFileSize, gymName };
 }
 
 // ========== 任務二：取副檔名 ==========
@@ -51,6 +55,16 @@ function getUploadConfig() {
 function getFileExtension(filename) {
   // TODO: 實作此函式
   // 提示：用 lastIndexOf('.') 找最後一個 .，toLowerCase() 轉小寫
+  // 1. 找最後一個 . 的位置
+  const lastDotIndex = filename.lastIndexOf('.');
+
+  // 2. 例外處理：完全沒有 . 的情況
+  if (lastDotIndex === -1) {
+    return '';
+  }
+
+  // 3. 從 . 的位置切到結尾，並轉成小寫
+  return filename.slice(lastDotIndex).toLowerCase();
 }
 
 // ========== 任務三：解析檔案 metadata ==========
@@ -76,6 +90,10 @@ function getFileExtension(filename) {
 function parseFileMetadata(file) {
   // TODO: 實作此函式
   // 提示：呼叫 getFileExtension 取副檔名，Math.round(size / 1024) 算 KB
+  const filename = file.originalFilename;
+  const sizeKB = Math.round(file.size / 1024);
+  const ext = getFileExtension(filename);
+  return { filename, sizeKB, ext };
 }
 
 // ========== 任務四：產出 upload log 字串 ==========
@@ -98,6 +116,9 @@ function parseFileMetadata(file) {
 function formatUploadLog(meta, config) {
   // TODO: 實作此函式
   // 提示：用 template literal 組字串
+  const { filename, sizeKB } = meta;
+  const { uploadDir, gymName } = config;
+  return `[${gymName}] Uploaded ${filename} (${sizeKB} KB) → ${uploadDir}`;
 }
 
 // ========== 任務五：路由分派 ==========
@@ -135,7 +156,82 @@ function router(req, res, config) {
   //   - 超過 maxFileSize 時 formidable v3 發 'error' event，要用 form.on('error', ...) 接
   //   - 同時 form.parse 的 callback err 也要處理
   //   - 避免重複 res.writeHead（檢查 res.headersSent）
+  if (req.method === 'POST' && req.url === '/coaches/avatar') {
+
+    const form = formidable({
+      uploadDir: config.uploadDir,
+      maxFileSize: config.maxFileSize,
+      keepExtensions: true,
+    });
+
+    // formidable v3：超過 maxFileSize 時，會從這裡發 error event
+    form.on('error', (err) => {
+      if (!res.headersSent) {
+        res.writeHead(500, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: err.message }));
+      }
+    });
+
+    form.parse(req, (err, fields, files) => {
+      // form.parse 的 callback err 也要接，雙重保護避免漏接錯誤
+      if (err) {
+        if (!res.headersSent) {
+          res.writeHead(500, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: err.message }));
+        }
+        return;
+      }
+      // console.log(files);
+
+      // {
+      //   file: 
+      //  [
+      //     {
+      //       originalFilename: 'leo.jpg',
+      //       filepath: '/tmp/upload_abc123.jpg',
+      //       size: 250000,
+      //       mimetype: 'image/jpeg',
+      //       newFilename: 'abc123.jpg',
+      //       // ...formidable 還會附上其他內部用的屬性
+      //     }
+      //   ]
+      // }
+      const file = files.file?.[0];
+
+      if (!file) {
+        res.writeHead(400, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: 'No file uploaded' }));
+        return;
+      }
+
+      const meta = parseFileMetadata(file);
+      // function parseFileMetadata(file) {
+      //   const filename = file.originalFilename;
+      //   const sizeKB = Math.round(file.size / 1024);
+      //   const ext = getFileExtension(filename);
+      //   return { filename, sizeKB, ext };
+      // }
+      // meta 現在等於:
+      // {
+      //   filename: 'leo.jpg',
+      //   sizeKB: 244,
+      //   ext: '.jpg'
+      // }
+
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({
+        filename: meta.filename,
+        sizeKB: meta.sizeKB,
+        ext: meta.ext,
+        savedPath: file.filepath,
+      }));
+    });
+  } else {
+    res.writeHead(404, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ error: 'Not Found' }));
+  }
 }
+
 
 // ========== 任務六：建立上傳 server ==========
 /**
@@ -156,8 +252,27 @@ function router(req, res, config) {
 function createUploadServer(config) {
   // TODO: 實作此函式
   // 提示：主邏輯都在 router 裡，這邊函式內容不多
-}
+  if (!fs.existsSync(config.uploadDir)) {
+    // fs.existsSync(路徑)：檢查路徑是否存在，回傳 true/false                
+    fs.mkdirSync(config.uploadDir, { recursive: true });
+  }
 
+  return http.createServer((req, res) => router(req, res, config));
+
+}
+// 為什麼這題用 Sync 版本，而不是非同步？
+// 因為 createUploadServer 只會在伺服器啟動的那一刻執行一次（不是每個 request 都跑一次），這種「啟動時的一次性設定」用同步版本卡一下完全沒問題，反而邏輯更直覺：「確保資料夾建好了，才繼續建立 server」，不用處理 callback 或 Promise 的複雜度。
+// 如果是放在 router 裡（每個 request 都會執行的地方），那種高頻率的地方才比較需要考慮用非同步版本，避免每個 request 都卡住整個伺服器。但這裡只是啟動時跑一次，用同步版本是合理且常見的做法。
+
+// process.env（環境變數）
+//     ↓ getUploadConfig() 讀取、整理
+// config = { uploadDir, maxFileSize, gymName }
+//     ↓ 傳進 createUploadServer(config)
+// createUploadServer 裡用 config 建資料夾、設定 http server
+//     ↓ 每次有 request 進來，又把同一份 config 傳進 router(req, res, config)
+// router 裡再用 config.uploadDir、config.maxFileSize 設定 formidable
+
+ 
 module.exports = {
   getUploadConfig,
   getFileExtension,
