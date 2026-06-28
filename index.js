@@ -29,7 +29,8 @@ function getUploadConfig() {
   // TODO: 實作此函式
   // 提示：用 || 給預設值；MAX_FILE_SIZE_MB 是字串，記得先 Number() 轉型再換算 bytes
   const uploadDir = process.env.UPLOAD_DIR || '/tmp';
-  const maxFileSize = Number(process.env.MAX_FILE_SIZE_MB) * 1024 * 1024 || 5 * 1024 * 1024;
+  const mbSize = Number(process.env.MAX_FILE_SIZE_MB) || 5;
+  const maxFileSize = mbSize * 1024 * 1024;
   const gymName = process.env.GYM_NAME || '未命名健身房';
   return { uploadDir, maxFileSize, gymName };
 }
@@ -146,7 +147,7 @@ function formatUploadLog(meta, config) {
  *   // 在 createUploadServer 裡：
  *   http.createServer((req, res) => router(req, res, config))
  */
-function router(req, res, config) {
+function handleUpload(req, res, config) {
   // TODO: 實作此函式
   // 建議（非強制）：
   //   - 拆出 handleUpload(req, res, config)：formidable 解析邏輯
@@ -156,68 +157,66 @@ function router(req, res, config) {
   //   - 超過 maxFileSize 時 formidable v3 發 'error' event，要用 form.on('error', ...) 接
   //   - 同時 form.parse 的 callback err 也要處理
   //   - 避免重複 res.writeHead（檢查 res.headersSent）
-  if (req.method === 'POST' && req.url === '/coaches/avatar') {
 
-    const form = formidable({
-      uploadDir: config.uploadDir,
-      maxFileSize: config.maxFileSize,
-      keepExtensions: true,
-    });
+  const form = formidable({
+    uploadDir: config.uploadDir,
+    maxFileSize: config.maxFileSize,
+    keepExtensions: true,
+  });
 
-    // formidable v3：超過 maxFileSize 時，會從這裡發 error event
-    form.on('error', (err) => {
+  // formidable v3：超過 maxFileSize 時，會從這裡發 error event
+  form.on('error', (err) => {
+    console.error('Upload error:', err.message);
+  });
+
+  form.parse(req, (err, fields, files) => {
+    // form.parse 的 callback err 也要接，雙重保護避免漏接錯誤
+    if (err) {
       if (!res.headersSent) {
         res.writeHead(500, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ error: err.message }));
       }
-    });
+    }
 
-    form.parse(req, (err, fields, files) => {
-      // form.parse 的 callback err 也要接，雙重保護避免漏接錯誤
-      if (err) {
-        if (!res.headersSent) {
-          res.writeHead(500, { 'Content-Type': 'application/json' });
-          res.end(JSON.stringify({ error: err.message }));
-        }
-        return;
-      }
-      // console.log(files);
+    // console.log(files);
 
-      // {
-      //   file: 
-      //  [
-      //     {
-      //       originalFilename: 'leo.jpg',
-      //       filepath: '/tmp/upload_abc123.jpg',
-      //       size: 250000,
-      //       mimetype: 'image/jpeg',
-      //       newFilename: 'abc123.jpg',
-      //       // ...formidable 還會附上其他內部用的屬性
-      //     }
-      //   ]
-      // }
-      const file = files.file?.[0];
+    // {
+    //   file: 
+    //  [
+    //     {
+    //       originalFilename: 'leo.jpg',
+    //       filepath: '/tmp/upload_abc123.jpg',
+    //       size: 250000,
+    //       mimetype: 'image/jpeg',
+    //       newFilename: 'abc123.jpg',
+    //       // ...formidable 還會附上其他內部用的屬性
+    //     }
+    //   ]
+    // }
+    const file = files.file?.[0];
 
-      if (!file) {
+    if (!file) {
+      if (!res.headersSent) {
         res.writeHead(400, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ error: 'No file uploaded' }));
-        return;
       }
+      return;
+    }
 
-      const meta = parseFileMetadata(file);
-      // function parseFileMetadata(file) {
-      //   const filename = file.originalFilename;
-      //   const sizeKB = Math.round(file.size / 1024);
-      //   const ext = getFileExtension(filename);
-      //   return { filename, sizeKB, ext };
-      // }
-      // meta 現在等於:
-      // {
-      //   filename: 'leo.jpg',
-      //   sizeKB: 244,
-      //   ext: '.jpg'
-      // }
-
+    const meta = parseFileMetadata(file);
+    // function parseFileMetadata(file) {
+    //   const filename = file.originalFilename;
+    //   const sizeKB = Math.round(file.size / 1024);
+    //   const ext = getFileExtension(filename);
+    //   return { filename, sizeKB, ext };
+    // }
+    // meta 現在等於:
+    // {
+    //   filename: 'leo.jpg',
+    //   sizeKB: 244,
+    //   ext: '.jpg'
+    // }
+    if (!res.headersSent) {
       res.writeHead(200, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({
         filename: meta.filename,
@@ -225,10 +224,20 @@ function router(req, res, config) {
         ext: meta.ext,
         savedPath: file.filepath,
       }));
-    });
+    }
+  });
+}
+
+function handleNotFound(req, res) {
+  res.writeHead(404, { 'Content-Type': 'application/json' });
+  res.end(JSON.stringify({ error: 'Not Found' }));
+}
+
+function router(req, res, config) {
+  if (req.method === 'POST' && req.url === '/coaches/avatar') {
+    handleUpload(req, res, config);
   } else {
-    res.writeHead(404, { 'Content-Type': 'application/json' });
-    res.end(JSON.stringify({ error: 'Not Found' }));
+    handleNotFound(req, res);
   }
 }
 
@@ -272,7 +281,7 @@ function createUploadServer(config) {
 //     ↓ 每次有 request 進來，又把同一份 config 傳進 router(req, res, config)
 // router 裡再用 config.uploadDir、config.maxFileSize 設定 formidable
 
- 
+
 module.exports = {
   getUploadConfig,
   getFileExtension,
